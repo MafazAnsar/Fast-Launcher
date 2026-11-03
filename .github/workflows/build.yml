@@ -1,0 +1,56 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Build and sign APK
+        run: |
+          set -e
+          BT="$ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)"
+          JAR="$ANDROID_HOME/platforms/$(ls $ANDROID_HOME/platforms | sort -V | tail -1)/android.jar"
+          echo "Using $BT and $JAR"
+
+          mkdir -p build/classes build/dex out
+
+          # 1. Package the manifest
+          "$BT/aapt2" link -o build/base.apk -I "$JAR" \
+            --manifest AndroidManifest.xml \
+            --min-sdk-version 23 --target-sdk-version 23 \
+            --version-code 1 --version-name 1.0
+
+          # 2. Compile Java
+          javac --release 8 -cp "$JAR" -d build/classes Launcher.java
+
+          # 3. Convert to Android bytecode
+          "$BT/d8" --release --min-api 23 --lib "$JAR" \
+            --output build/dex $(find build/classes -name '*.class')
+
+          # 4. Add code to the APK, then align
+          (cd build/dex && zip -j ../base.apk classes.dex)
+          "$BT/zipalign" -f -p 4 build/base.apk build/aligned.apk
+
+          # 5. Sign with a throwaway debug key
+          keytool -genkeypair -keystore build/debug.keystore \
+            -storepass android -keypass android -alias key \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Fast Launcher"
+          "$BT/apksigner" sign --ks build/debug.keystore \
+            --ks-pass pass:android --key-pass pass:android \
+            --out out/FastLauncher.apk build/aligned.apk
+          "$BT/apksigner" verify --verbose out/FastLauncher.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FastLauncher-apk
+          path: out/FastLauncher.apk
