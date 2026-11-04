@@ -35,7 +35,7 @@ jobs:
             --version-code 1 --version-name 1.0
 
           echo "== 2. Compile Java"
-          javac --release 8 -Xlint:-options -cp "$JAR" -d build/classes Launcher.java
+          javac --release 8 -Xlint:-options -cp "$JAR" -d build/classes *.java
 
           echo "== 3. Convert to Android bytecode"
           "$BT/d8" --release --min-api 23 --lib "$JAR" \
