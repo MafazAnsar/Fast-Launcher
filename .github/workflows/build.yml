@@ -5,11 +5,11 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -17,30 +17,35 @@ jobs:
       - name: Build and sign APK
         run: |
           set -e
-          BT="$ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)"
-          JAR="$ANDROID_HOME/platforms/$(ls $ANDROID_HOME/platforms | sort -V | tail -1)/android.jar"
-          echo "Using $BT and $JAR"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "SDK=$SDK"
+          ls "$SDK/build-tools" "$SDK/platforms"
+
+          BT="$SDK/build-tools/$(ls "$SDK/build-tools" | grep -E '^[0-9.]+$' | sort -V | tail -1)"
+          JAR="$SDK/platforms/$(ls "$SDK/platforms" | grep -E '^android-[0-9]+$' | sort -V | tail -1)/android.jar"
+          echo "Using BT=$BT"
+          echo "Using JAR=$JAR"
 
           mkdir -p build/classes build/dex out
 
-          # 1. Package the manifest
+          echo "== 1. Package manifest"
           "$BT/aapt2" link -o build/base.apk -I "$JAR" \
             --manifest AndroidManifest.xml \
             --min-sdk-version 23 --target-sdk-version 23 \
             --version-code 1 --version-name 1.0
 
-          # 2. Compile Java
-          javac --release 8 -cp "$JAR" -d build/classes Launcher.java
+          echo "== 2. Compile Java"
+          javac --release 8 -Xlint:-options -cp "$JAR" -d build/classes Launcher.java
 
-          # 3. Convert to Android bytecode
+          echo "== 3. Convert to Android bytecode"
           "$BT/d8" --release --min-api 23 --lib "$JAR" \
             --output build/dex $(find build/classes -name '*.class')
 
-          # 4. Add code to the APK, then align
+          echo "== 4. Add code to APK and align"
           (cd build/dex && zip -j ../base.apk classes.dex)
           "$BT/zipalign" -f -p 4 build/base.apk build/aligned.apk
 
-          # 5. Sign with a throwaway debug key
+          echo "== 5. Sign"
           keytool -genkeypair -keystore build/debug.keystore \
             -storepass android -keypass android -alias key \
             -keyalg RSA -keysize 2048 -validity 10000 \
