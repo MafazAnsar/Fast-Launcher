@@ -1,6 +1,7 @@
 package com.mafaz.fastlauncher;
 
 import android.app.Activity;
+import android.app.KeyguardManager;
 import android.app.Service;
 import android.content.*;
 import android.content.pm.*;
@@ -34,6 +35,53 @@ public class Launcher extends Activity {
         return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_LOCK, true);
     }
 
+    // After a correct PIN, the system lock screen may show without being covered again
+    static volatile long graceUntil = 0;
+
+    interface PinCb { void ok(String pin); }
+
+    static boolean hasPin(Context c) {
+        return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("pin", null) != null;
+    }
+
+    static String hashPin(String salt, String pin) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] d = md.digest((salt + pin).getBytes("UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            for (byte x : d) sb.append(String.format("%02x", x));
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    static void savePin(Context c, String pin) {
+        byte[] r = new byte[8];
+        new java.security.SecureRandom().nextBytes(r);
+        StringBuilder sb = new StringBuilder();
+        for (byte x : r) sb.append(String.format("%02x", x));
+        String salt = sb.toString();
+        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("salt", salt)
+            .putString("pin", hashPin(salt, pin))
+            .putInt("fails", 0)
+            .putLong("lockUntil", 0)
+            .apply();
+    }
+
+    static boolean checkPin(Context c, String pin) {
+        SharedPreferences sp = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String h = sp.getString("pin", null);
+        if (h == null) return true;
+        return h.equals(hashPin(sp.getString("salt", ""), pin));
+    }
+
+    static void clearPin(Context c) {
+        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .remove("pin").remove("salt").apply();
+    }
+
     private final BroadcastReceiver pkgReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) { loadApps(); }
     };
@@ -58,13 +106,9 @@ public class Launcher extends Activity {
         clock.setTypeface(android.graphics.Typeface.create("sans-serif-thin", 0));
         root.addView(clock);
 
-        // Long-press the clock to turn the lock screen on/off
+        // Long-press the clock for lock screen settings
         clock.setOnLongClickListener(v -> {
-            boolean on = !lockEnabled(this);
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_LOCK, on).apply();
-            applyLockSetting();
-            Toast.makeText(this, on ? "Lock screen on" : "Lock screen off",
-                Toast.LENGTH_SHORT).show();
+            showLockMenu();
             return true;
         });
 
@@ -161,6 +205,89 @@ public class Launcher extends Activity {
         applyLockSetting();
     }
 
+    private void toast(String m) {
+        Toast.makeText(this, m, Toast.LENGTH_SHORT).show();
+    }
+
+    private void setLock(boolean on) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_LOCK, on).apply();
+        applyLockSetting();
+        toast(on ? "Lock screen on" : "Lock screen off");
+    }
+
+    private void askPin(String title, PinCb cb) {
+        final EditText et = new EditText(this);
+        et.setInputType(android.text.InputType.TYPE_CLASS_NUMBER
+                | android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        et.setFilters(new android.text.InputFilter[]{
+            new android.text.InputFilter.LengthFilter(8) });
+        new android.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(et)
+            .setPositiveButton("OK", (d, w) -> cb.ok(et.getText().toString()))
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    private void askNewPin() {
+        askPin("New PIN (4-8 digits)", p -> {
+            if (p.length() < 4) { toast("PIN too short"); return; }
+            savePin(this, p);
+            toast("PIN saved");
+        });
+    }
+
+    private void showLockMenu() {
+        final boolean on = lockEnabled(this);
+        final boolean pin = hasPin(this);
+        final List<String> items = new ArrayList<>();
+        items.add(on ? "Turn lock screen OFF" : "Turn lock screen ON");
+        items.add(pin ? "Change PIN" : "Set PIN");
+        if (pin) items.add("Remove PIN");
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("Lock screen")
+            .setItems(items.toArray(new String[0]), (d, which) -> {
+                if (which == 0) {
+                    if (on && pin) {
+                        askPin("Current PIN", cur -> {
+                            if (checkPin(this, cur)) setLock(false); else toast("Wrong PIN");
+                        });
+                    } else {
+                        setLock(!on);
+                    }
+                } else if (which == 1) {
+                    if (pin) {
+                        askPin("Current PIN", cur -> {
+                            if (checkPin(this, cur)) askNewPin(); else toast("Wrong PIN");
+                        });
+                    } else {
+                        askNewPin();
+                    }
+                } else {
+                    askPin("Current PIN", cur -> {
+                        if (checkPin(this, cur)) { clearPin(this); toast("PIN removed"); }
+                        else toast("Wrong PIN");
+                    });
+                }
+            })
+            .show();
+    }
+
+    // Pressing Home while locked must not reveal the system lock screen
+    @Override
+    protected void onResume() {
+        super.onResume();
+        KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+        if (lockEnabled(this) && km.isKeyguardLocked()
+                && System.currentTimeMillis() > graceUntil) {
+            Intent l = new Intent(this, LockActivity.class);
+            l.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+            startActivity(l);
+        }
+    }
+
     private void applyLockSetting() {
         Intent s = new Intent(this, LockService.class);
         if (lockEnabled(this)) startService(s); else stopService(s);
@@ -218,6 +345,7 @@ public class Launcher extends Activity {
     public static class LockService extends Service {
         private final BroadcastReceiver off = new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent i) {
+                graceUntil = 0;
                 if (!lockEnabled(c)) return;
                 Intent l = new Intent(c, LockActivity.class);
                 l.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
@@ -244,20 +372,41 @@ public class Launcher extends Activity {
         }
     }
 
-    // The lock screen: clock, date, battery, swipe up to unlock
+    // The lock screen: clock, date, battery; swipe up (PIN if set) to reach the system lock
     public static class LockActivity extends Activity {
         private float downY;
+        private float dp;
+        private FrameLayout frame;
+        private View clockView;
+        private TextView msg, dots;
+        private final StringBuilder entry = new StringBuilder();
+
+        // Fires when the device is unlocked (fingerprint, PIN or swipe)
+        private final BroadcastReceiver present = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) {
+                graceUntil = 0;
+                finish();
+            }
+        };
 
         @Override
         protected void onCreate(Bundle b) {
             super.onCreate(b);
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
-            final float dp = getResources().getDisplayMetrics().density;
+            registerReceiver(present, new IntentFilter(Intent.ACTION_USER_PRESENT));
+            dp = getResources().getDisplayMetrics().density;
 
+            frame = new FrameLayout(this);
+            frame.setBackgroundColor(Color.BLACK);
+            clockView = buildClock();
+            setContentView(frame);
+            showClock();
+        }
+
+        private View buildClock() {
             LinearLayout root = new LinearLayout(this);
             root.setOrientation(LinearLayout.VERTICAL);
             root.setGravity(Gravity.CENTER);
-            root.setBackgroundColor(Color.BLACK);
 
             TextClock clock = new TextClock(this);
             clock.setFormat24Hour("HH:mm");
@@ -306,21 +455,69 @@ public class Launcher extends Activity {
                         downY = e.getY();
                         return true;
                     case MotionEvent.ACTION_UP:
-                        if (downY - e.getY() > 120 * dp) unlock();
+                        if (downY - e.getY() > 120 * dp) swipedUp();
                         return true;
                 }
                 return true;
             });
-
-            setContentView(root);
+            return root;
         }
 
-        private void unlock() {
-            // Removes a plain swipe lock; with a PIN/pattern the system lock appears next
-            getWindow().addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
-            getWindow().getDecorView().postDelayed(() -> finish(), 120);
+        private void showClock() {
+            entry.setLength(0);
+            frame.removeAllViews();
+            frame.addView(clockView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
 
-        @Override public void onBackPressed() { }
-    }
-}
+        private void swipedUp() {
+            if (hasPin(this)) showPad(); else unlock();
+        }
+
+        private void showPad() {
+            entry.setLength(0);
+            LinearLayout pad = new LinearLayout(this);
+            pad.setOrientation(LinearLayout.VERTICAL);
+            pad.setGravity(Gravity.CENTER);
+
+            msg = new TextView(this);
+            msg.setText("Enter PIN");
+            msg.setTextColor(Color.WHITE);
+            msg.setTextSize(18);
+            msg.setGravity(Gravity.CENTER);
+            pad.addView(msg);
+
+            dots = new TextView(this);
+            dots.setText(" ");
+            dots.setTextColor(Color.WHITE);
+            dots.setTextSize(28);
+            dots.setGravity(Gravity.CENTER);
+            dots.setPadding(0, (int) (8 * dp), 0, (int) (16 * dp));
+            pad.addView(dots);
+
+            String[][] rows = {
+                {"1", "2", "3"}, {"4", "5", "6"}, {"7", "8", "9"}, {"DEL", "0", "OK"}
+            };
+            int m = (int) (6 * dp);
+            for (String[] r : rows) {
+                LinearLayout row = new LinearLayout(this);
+                row.setGravity(Gravity.CENTER);
+                for (String k : r) {
+                    TextView key = new TextView(this);
+                    key.setText(k);
+                    key.setTextColor(Color.WHITE);
+                    key.setTextSize(k.length() > 1 ? 16 : 24);
+                    key.setGravity(Gravity.CENTER);
+                    key.setBackgroundColor(0x22FFFFFF);
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        (int) (84 * dp), (int) (64 * dp));
+                    lp.setMargins(m, m, m, m);
+                    key.setOnClickListener(v -> onKey(k));
+                    row.addView(key, lp);
+                }
+                pad.addView(row);
+            }
+
+            TextView cancel = new TextView(this);
+            cancel.setText("Cancel");
+            cancel.setTextColor(0xFFAA
