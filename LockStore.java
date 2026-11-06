@@ -27,7 +27,7 @@ final class LockStore {
     static void relock(Context c) {
         if (lockShowing) return;
         if (!lockEnabled(c)) return;
-        if (System.currentTimeMillis() < graceUntil) return;
+        if (android.os.SystemClock.elapsedRealtime() < graceUntil) return;
         android.telephony.TelephonyManager tm = (android.telephony.TelephonyManager)
             c.getSystemService(Context.TELEPHONY_SERVICE);
         if (tm != null && tm.getCallState() != android.telephony.TelephonyManager.CALL_STATE_IDLE) {
