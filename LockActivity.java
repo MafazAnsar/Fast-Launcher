@@ -10,6 +10,7 @@ import android.graphics.Color;
 import android.os.BatteryManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -205,10 +206,12 @@ public class LockActivity extends Activity {
 
     private void submit() {
         SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
-        long now = System.currentTimeMillis();
-        long until = sp.getLong("lockUntil", 0);
-        if (now < until) {
-            msg.setText("Too many tries. Wait " + ((until - now) / 1000 + 1) + "s");
+        // Uses the device's running timer, so changing the date/time cannot stretch the wait,
+        // and a wait is never longer than 30 seconds
+        long now = SystemClock.elapsedRealtime();
+        long left = sp.getLong("lockUntil", 0) - now;
+        if (left > 0 && left <= 30000) {
+            msg.setText("Too many tries. Wait " + (left / 1000 + 1) + "s");
         } else if (checkPin(this, entry.toString())) {
             sp.edit().putInt("fails", 0).apply();
             unlock();
@@ -231,7 +234,7 @@ public class LockActivity extends Activity {
 
     private void unlock() {
         // Lets the system lock screen show (a plain swipe lock is removed entirely)
-        graceUntil = System.currentTimeMillis() + 30000;
+        graceUntil = SystemClock.elapsedRealtime() + 30000;
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
         getWindow().getDecorView().postDelayed(() -> finish(), 120);
     }
