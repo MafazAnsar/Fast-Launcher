@@ -225,7 +225,7 @@ public class Launcher extends Activity {
         super.onResume();
         KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
         if (lockEnabled(this) && km.isKeyguardLocked()
-                && System.currentTimeMillis() > graceUntil) {
+                && android.os.SystemClock.elapsedRealtime() > graceUntil) {
             Intent l = new Intent(this, LockActivity.class);
             l.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP
